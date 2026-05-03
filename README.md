@@ -65,7 +65,6 @@ Create `.env`:
 ```
 ANTHROPIC_API_KEY=sk-ant-your-key-here
 TELEGRAM_BOT_TOKEN=your-bot-token
-TELEGRAM_ONLY=true
 ASSISTANT_NAME=YourName
 ```
 
@@ -90,6 +89,7 @@ Everything below ships with every install.
 - **Scheduled tasks** — "check Hacker News every morning" or cron syntax. Natural language or precise.
 - **Per-group personality** — each chat gets its own `CLAUDE.md` defining tone, memory, and rules.
 - **Model selection** — switch between Sonnet, Opus, Haiku from Telegram. Just type `/model`.
+- **Cost controls** — every turn writes a `usage_events` row. `/budget` shows today's spend. `/budget set 10` caps daily spend at $10 — once hit, GhostClaw falls back to fast-path-only (cheap chat) until UTC midnight.
 
 ### Mission Control
 
@@ -135,6 +135,7 @@ Build your own — skills are markdown files. Ask Claude to write one or create 
 | `/reset` | Kill stalled agent, wipe session. Next message starts fresh. |
 | `/status` | Active agents, queue depth, uptime. |
 | `/model` | View or switch AI model (sonnet, opus, haiku). |
+| `/budget` | Today's spend; `/budget set N` to cap, `/budget off` to disable. |
 | `/skills` | List installed skills. |
 | `/update` | Pull latest code, rebuild, restart — no SSH needed. |
 | `/ping` | Check if the bot is online. |
@@ -166,21 +167,19 @@ All config lives in `.env`. The setup wizard creates this.
 
 | Variable | Required | Description |
 |----------|----------|-------------|
-| `CLAUDE_CODE_OAUTH_TOKEN` | Yes* | Claude Max subscription token |
-| `ANTHROPIC_API_KEY` | Yes* | Or use an API key instead |
+| `ANTHROPIC_API_KEY` | Yes | Get one at [console.anthropic.com](https://console.anthropic.com/settings/keys) |
 | `ASSISTANT_NAME` | Yes | Bot name (trigger word in groups) |
 | `TELEGRAM_BOT_TOKEN` | Yes | From @BotFather |
-| `GHOSTCLAW_MODEL` | No | Default: sonnet. Also: opus, haiku |
+| `GHOSTCLAW_MODEL` | No | Default: `claude-sonnet-4-6`. Also: `claude-opus-4-7`, `claude-haiku-4-5` |
+| `GHOSTCLAW_FAST_PATH_MODEL` | No | Cheap triage layer. Default: `claude-sonnet-4-6`. Set to `claude-haiku-4-5` to cut triage cost ~3x (at the price of weaker handoff behaviour) |
+| `GHOSTCLAW_DAILY_BUDGET_USD` | No | Cap daily spend; auto-falls back to fast-path-only when hit. Manage from Telegram with `/budget` |
 | `ELEVENLABS_API_KEY` | No | For voice transcription and replies |
-| `TELEGRAM_ONLY` | No | Set `true` to skip WhatsApp |
 | `GMAIL_MCP_ENABLED` | No | Set `1` for email integration |
-
-*One of `CLAUDE_CODE_OAUTH_TOKEN` or `ANTHROPIC_API_KEY` is required.
 
 ## FAQ
 
 **What does it cost?**
-Your Claude subscription (Max or API) and optionally ElevenLabs for voice. No platform fees.
+Anthropic API usage (pay-as-you-go) and optionally ElevenLabs for voice. No platform fees. Set `GHOSTCLAW_DAILY_BUDGET_USD` or `/budget set N` to cap daily spend.
 
 **Is this secure?**
 The bot has full access to its machine. That's the design — run it on dedicated hardware with fresh accounts, not your daily driver. Skills are security-scanned before install.
