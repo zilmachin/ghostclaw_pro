@@ -14,6 +14,29 @@ import {
 
 let db: Database.Database;
 
+/**
+ * Bumped on every schema change. Stamped into the `schema_version` table
+ * on init. Not a migration runner — just a known marker so a future
+ * destructive change has a starting point to migrate from.
+ *
+ * History:
+ *   1 — v0.8.1 (2026-05-03): first stamped version. Schema includes
+ *       chats, messages, scheduled_tasks, task_run_logs, router_state,
+ *       sessions, registered_groups, usage_events.
+ */
+const SCHEMA_VERSION = 1;
+
+export function getSchemaVersion(): number {
+  try {
+    const row = db
+      .prepare('SELECT version FROM schema_version WHERE id = 1')
+      .get() as { version: number } | undefined;
+    return row?.version ?? 0;
+  } catch {
+    return 0;
+  }
+}
+
 function createSchema(database: Database.Database): void {
   database.exec(`
     CREATE TABLE IF NOT EXISTS chats (
@@ -97,7 +120,26 @@ function createSchema(database: Database.Database): void {
       cost_usd REAL DEFAULT 0
     );
     CREATE INDEX IF NOT EXISTS idx_usage_timestamp ON usage_events(timestamp);
+
+    CREATE TABLE IF NOT EXISTS schema_version (
+      id INTEGER PRIMARY KEY CHECK (id = 1),
+      version INTEGER NOT NULL,
+      updated_at TEXT NOT NULL
+    );
   `);
+
+  // Stamp the current schema version. Single-row table (CHECK id = 1).
+  // Not a full migration runner — just a known marker so any future
+  // destructive change has a starting point to migrate from.
+  database
+    .prepare(
+      `INSERT INTO schema_version (id, version, updated_at) VALUES (1, ?, ?)
+       ON CONFLICT(id) DO UPDATE SET
+         version = excluded.version,
+         updated_at = excluded.updated_at
+       WHERE schema_version.version < excluded.version`,
+    )
+    .run(SCHEMA_VERSION, new Date().toISOString());
 
   // Add context_mode column if it doesn't exist (migration for existing DBs)
   try {

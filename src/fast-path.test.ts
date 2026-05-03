@@ -2,8 +2,8 @@ import { describe, it, expect } from 'vitest';
 
 import { shouldBypassFastPath } from './fast-path.js';
 
-describe('shouldBypassFastPath', () => {
-  it('matches explicit persistence verbs', () => {
+describe('shouldBypassFastPath — true when message starts with a memory-write verb', () => {
+  it('matches imperative forms at the start', () => {
     expect(shouldBypassFastPath('remember that I like coffee')).toBe(true);
     expect(shouldBypassFastPath('Log this: the build is green')).toBe(true);
     expect(shouldBypassFastPath('save this for later')).toBe(true);
@@ -28,6 +28,13 @@ describe('shouldBypassFastPath', () => {
     expect(shouldBypassFastPath('Note That the build passed')).toBe(true);
   });
 
+  it('tolerates leading punctuation/whitespace', () => {
+    expect(shouldBypassFastPath('  remember to ping Alice')).toBe(true);
+    expect(shouldBypassFastPath('"remember the milk"')).toBe(true);
+  });
+});
+
+describe('shouldBypassFastPath — false for conversational uses', () => {
   it('does not match normal chat', () => {
     expect(shouldBypassFastPath('hey, how are you?')).toBe(false);
     expect(shouldBypassFastPath('what is the weather today')).toBe(false);
@@ -36,10 +43,22 @@ describe('shouldBypassFastPath', () => {
     expect(shouldBypassFastPath('tell me about the new model')).toBe(false);
   });
 
-  it('does not false-positive on embedded fragments', () => {
-    // "noted" should not trigger "note this" — word-boundary required
+  it('does not false-positive on the verb appearing mid-sentence', () => {
+    // "I don't remember…" is description, not a memory-write request.
+    expect(shouldBypassFastPath("I don't remember seeing that")).toBe(false);
+    expect(shouldBypassFastPath('Yeah, save that for later maybe')).toBe(false);
+    expect(shouldBypassFastPath('did you note the timestamp?')).toBe(false);
+    expect(shouldBypassFastPath('he said to keep in mind the deadline')).toBe(
+      false,
+    );
+    expect(shouldBypassFastPath('I want to file this under boring')).toBe(
+      false,
+    );
+  });
+
+  it('does not match different tenses', () => {
     expect(shouldBypassFastPath('duly noted, moving on')).toBe(false);
-    // "remembered" is a different tense — allowed for pure chat
     expect(shouldBypassFastPath('I remembered the password')).toBe(false);
+    expect(shouldBypassFastPath('she logged the bug')).toBe(false);
   });
 });

@@ -1,9 +1,9 @@
 /**
  * Fast path — single Claude API call for simple queries.
  *
- * Reads CLAUDE.md + memory files, sends them as system prompt with the user's
- * message. Claude decides whether it can answer directly or needs the full
- * agent stack. No tools, no MCP, no session state.
+ * Reads identity.md + state.md, sends them as a cached system prompt with
+ * the user's message. Claude decides whether it can answer directly or
+ * needs the full agent stack. No tools, no MCP, no session state.
  */
 import fs from 'fs';
 import path from 'path';
@@ -13,6 +13,7 @@ import Anthropic from '@anthropic-ai/sdk';
 import { GROUPS_DIR } from './config.js';
 import { readEnvFile } from './env.js';
 import { logger } from './logger.js';
+import { estimateCostUsd } from './pricing.js';
 
 export interface FastPathUsage {
   input_tokens: number;
@@ -29,28 +30,31 @@ export interface FastPathResult {
   usage?: FastPathUsage;
 }
 
-/** Claude 4.x list prices — used to estimate fast-path cost for budget tracking. */
-const MODEL_PRICING: Record<string, { input: number; output: number }> = {
-  'claude-haiku-4-5': { input: 1.0, output: 5.0 },
-  'claude-sonnet-4-5': { input: 3.0, output: 15.0 },
-  'claude-sonnet-4-6': { input: 3.0, output: 15.0 },
-  'claude-opus-4-5': { input: 15.0, output: 75.0 },
-  'claude-opus-4-7': { input: 15.0, output: 75.0 },
-};
+// Memory-write triggers: phrases that mean "persist this", which the
+// fast-path has no tools to do. Anchored to start of message (with optional
+// leading punctuation) — bare \bremember\b would false-positive on "I don't
+// remember seeing that" or "save that for later" and waste a full agent
+// spawn.
+const MEMORY_TRIGGER_VERBS = [
+  'remember(?: that| this)?',
+  "don'?t forget",
+  'log (?:this|that)',
+  'save (?:this|that)',
+  'note (?:this|that)',
+  'bank (?:this|that)',
+  'file (?:this|that)',
+  'write (?:this )?down',
+  'store (?:this|that)',
+  'keep in mind',
+  'for future reference',
+  'make a note',
+  'take a note',
+];
 
-function estimateCostUsd(
-  model: string,
-  usage: { input_tokens: number; output_tokens: number },
-): number | undefined {
-  const key = Object.keys(MODEL_PRICING).find((k) => model.startsWith(k));
-  if (!key) return undefined;
-  const p = MODEL_PRICING[key];
-  return (usage.input_tokens * p.input + usage.output_tokens * p.output) / 1e6;
-}
-
-// Patterns that should always go to full agent (memory writes needed)
-const MEMORY_TRIGGERS =
-  /\b(remember|log (this|that)|save (this|that)|don'?t forget|note (this|that)|bank this|file this|write (this )?down|store (this|that)|keep in mind|for future reference|make a note|take a note)\b/i;
+const MEMORY_TRIGGERS = new RegExp(
+  `^[\\s"'\`(]*(?:${MEMORY_TRIGGER_VERBS.join('|')})\\b`,
+  'i',
+);
 
 export function shouldBypassFastPath(message: string): boolean {
   return MEMORY_TRIGGERS.test(message);
@@ -91,6 +95,19 @@ const ROUTING_SUFFIX = `
 
 Reply now. Either a short direct answer from the context above, or "${FAST_PATH_HANDOFF}" if any tool or action is needed.`;
 
+// Memo cache for memory-file reads. The fast-path runs on every Telegram
+// message; without memoization we hit disk twice per call. 60s TTL means
+// edits to identity.md / state.md propagate within a minute, and the cache
+// usually outlives a chat burst (so prompt caching on the API side stays
+// hot — same string each call, same cache key).
+interface MemoryFileCache {
+  identity: string;
+  state: string;
+  expiresAt: number;
+}
+const memoryCache = new Map<string, MemoryFileCache>();
+const MEMORY_CACHE_TTL_MS = 60_000;
+
 function readFileIfExists(filePath: string): string {
   try {
     return fs.readFileSync(filePath, 'utf-8');
@@ -99,20 +116,36 @@ function readFileIfExists(filePath: string): string {
   }
 }
 
-function buildSystemPrompt(groupFolder: string): string {
+function readMemoryFiles(groupFolder: string): {
+  identity: string;
+  state: string;
+} {
+  const cached = memoryCache.get(groupFolder);
+  if (cached && cached.expiresAt > Date.now()) {
+    return { identity: cached.identity, state: cached.state };
+  }
   const memoryDir = path.join(GROUPS_DIR, groupFolder, 'memory');
   const identity = readFileIfExists(path.join(memoryDir, 'identity.md'));
   const state = readFileIfExists(path.join(memoryDir, 'state.md'));
+  memoryCache.set(groupFolder, {
+    identity,
+    state,
+    expiresAt: Date.now() + MEMORY_CACHE_TTL_MS,
+  });
+  return { identity, state };
+}
 
-  // CLAUDE.md is intentionally NOT included: it's written for the full
-  // tool-using agent and tells the reader to "use the Read tool before
-  // responding". Haiku has no tools — injecting that directive makes it
-  // hallucinate tool calls and leak reasoning preamble.
+/** @internal — for tests. */
+export function _clearFastPathMemoryCache(): void {
+  memoryCache.clear();
+}
+
+function buildSystemPrompt(groupFolder: string): string {
+  const { identity, state } = readMemoryFiles(groupFolder);
   const parts: string[] = [ROUTING_PREFIX];
   if (identity) parts.push(`# Identity\n${identity}`);
   if (state) parts.push(`# State\n${state}`);
   parts.push(ROUTING_SUFFIX);
-
   return parts.join('\n\n');
 }
 
@@ -153,10 +186,21 @@ export async function tryFastPath(
   const systemPrompt = buildSystemPrompt(groupFolder);
 
   try {
+    // System prompt is sent as a single cached block with a 1h TTL. The
+    // text changes only when identity.md or state.md is edited, so the
+    // cache stays warm across an entire chat session and survives gaps
+    // between bursts. Cache-read is 10% of fresh input, so even a single
+    // hit pays for several misses.
     const response = await getClient().messages.create({
       model,
       max_tokens: 1024,
-      system: systemPrompt,
+      system: [
+        {
+          type: 'text',
+          text: systemPrompt,
+          cache_control: { type: 'ephemeral', ttl: '1h' },
+        },
+      ],
       messages: [{ role: 'user', content: message }],
     });
 
@@ -172,12 +216,12 @@ export async function tryFastPath(
         response.usage?.cache_read_input_tokens ?? undefined,
       model,
     };
-    usage.cost_usd = estimateCostUsd(model, usage);
+    usage.cost_usd = estimateCostUsd(model, usage, '1h');
 
     // Handoff if the marker appears ANYWHERE in the response — not just at
-    // the start. Haiku sometimes writes preamble like "The user is asking X
-    // [HANDOFF]"; treating that as a direct answer sends the preamble to the
-    // user. Safer to hand off on any sighting of the marker.
+    // the start. Sometimes the model writes preamble like "The user is
+    // asking X [HANDOFF]"; treating that as a direct answer would send the
+    // preamble to the user. Safer to hand off on any sighting of the marker.
     if (text.includes(FAST_PATH_HANDOFF)) {
       logger.info(
         { groupFolder, cost: usage.cost_usd },
@@ -191,6 +235,8 @@ export async function tryFastPath(
         groupFolder,
         tokens: response.usage?.output_tokens,
         cost: usage.cost_usd,
+        cache_read: usage.cache_read_input_tokens,
+        cache_create: usage.cache_creation_input_tokens,
       },
       'Fast path handled message directly',
     );

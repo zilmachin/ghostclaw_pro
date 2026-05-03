@@ -1,5 +1,34 @@
 # Changelog
 
+## v0.8.1 (2026-05-03) — Fast-path cost levers + reliability nits
+
+### New
+- **Prompt caching on the fast-path.** The system block (ROUTING_PREFIX +
+  identity.md + state.md) is now sent with `cache_control: {type:
+  "ephemeral", ttl: "1h"}`. Cache reads cost 10% of fresh input, so once
+  warm the per-call input cost drops ~10x. The 1h TTL covers chat bursts
+  with gaps; the cache invalidates automatically when memory files change.
+- **Memory-file read memoization.** `identity.md` and `state.md` are now
+  cached in-process for 60s, so a flurry of fast-path calls during a chat
+  burst doesn't re-read disk every time. Edits propagate within the TTL.
+- **`schema_version` table in `db.ts`.** Single-row stamp set on init
+  (currently version 1). Not a migration runner — just a known marker so
+  any future destructive schema change has a starting point. `getSchemaVersion()`
+  exported.
+
+### Fixes
+- **`MEMORY_TRIGGERS` no longer false-positives mid-sentence.** The regex is
+  now anchored to the start of the message (with optional leading
+  whitespace/punctuation). "I don't remember seeing that" and "save that
+  for later" no longer wrongly bypass the fast-path and burn a full agent
+  spawn. False-positive cases are tested.
+
+### KISS
+- **Pricing table extracted** from `src/fast-path.ts` to a new
+  `src/pricing.ts` with a `Verified 2026-05-03` header and cache-aware
+  cost estimation (cache reads at 10%, 1h cache writes at 200% of base
+  input). Budget tracking is meaningless if these silently drift.
+
 ## v0.8.0 (unreleased) — API-direct, fast-path, budget cap, KISS sweep
 
 ### Breaking
