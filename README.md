@@ -43,6 +43,8 @@ GhostClaw started as a NanoClaw fork with one question: what if you ripped out e
 
 ## Get started
 
+> **v0.8.0 is API-direct.** From v0.8.0 onwards GhostClaw runs on the Anthropic API (`ANTHROPIC_API_KEY`) only — Claude Max / OAuth login is no longer supported. Every turn writes a `usage_events` row and `/budget` lets you cap daily spend. If you were on a v0.7.x build with `CLAUDE_CODE_OAUTH_TOKEN`, see [Migrating from v0.7](#migrating-from-v07).
+
 > **New to AI agents?** Read [learn.md](https://ghostclaw.io/learn.md) first — the full picture on personal agents in 2026, how GhostClaw compares to OpenClaw, Hermes, NanoClaw and others, and what you're getting into. Or drop it into Claude Code as a skill and ask it anything.
 
 ```bash
@@ -160,6 +162,20 @@ npm run build
 # macOS: launchctl kickstart -k gui/$(id -u)/com.ghostclaw
 # Linux: systemctl --user restart ghostclaw
 ```
+
+### Migrating from v0.7
+
+v0.8.0 is a redesign around the Anthropic API. **Claude Max / OAuth login is no longer supported** — the keychain read, `CLAUDE_CODE_OAUTH_TOKEN`, and the `.env` write-back fallback are all removed. Every agent turn now hits the API directly and is billed per-token.
+
+If you're on v0.7.x:
+
+1. Get an API key at [console.anthropic.com](https://console.anthropic.com/settings/keys).
+2. In `.env`, replace `CLAUDE_CODE_OAUTH_TOKEN=...` with `ANTHROPIC_API_KEY=sk-ant-...`.
+3. Set a daily cap so the API bill can't surprise you: `GHOSTCLAW_DAILY_BUDGET_USD=5` (or `/budget set 5` from Telegram). When today's spend hits the cap, GhostClaw falls back to fast-path-only chat until UTC midnight.
+4. `/update` (or pull, build, restart manually).
+5. Send `/budget` in Telegram after a day to sanity-check spend.
+
+Containers and WhatsApp were also removed in this line — if you had `TELEGRAM_ONLY=true` set, you can drop it (no-op now).
 
 ## Configuration
 
